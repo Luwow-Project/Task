@@ -6,7 +6,7 @@ repository like https://github.com/Luwow-Project/Release
 
 ## Project Overview
 
-This project contains the sources for Luwow Task library and the executable `runscriptwithtasklib`.
+This project contains the sources for Luwow Task library.
 
 This library requires the external library [libuv](https://github.com/libuv/libuv) as a dependency, add it to your CMakeLists.txt file using `LIBUV_ROOT`.
 

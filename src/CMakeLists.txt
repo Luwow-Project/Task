@@ -1,6 +1,6 @@
 add_library(Luwow.TaskLibrary STATIC)
 target_include_directories(Luwow.TaskLibrary PRIVATE
-    ${TASK_ROOT}/src/TaskLibrary
+    ${TASK_ROOT}/src
     ${LIBUV_ROOT}/include
     ${ENGINE_ROOT}
 )
