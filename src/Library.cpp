@@ -15,7 +15,7 @@ namespace Luwow::Task {
 
     Library* Library::instance = nullptr;
 
-    Library::Library() : engine(nullptr), scheduler(nullptr) {}
+    Library::Library() : host(nullptr), scheduler(nullptr) {}
 
     Library::~Library() {
         if (scheduler) {
@@ -47,7 +47,7 @@ namespace Luwow::Task {
             return 0;
         }
 
-        instance->engine->callDebuggerLuauCallback(TL, chunkName, true);
+        instance->host->callDebuggerLuauCallback(TL, chunkName, true);
         scheduler->spawn(T);
 
         // If the thread has yielded, we run the uv loop here manually.
@@ -82,19 +82,19 @@ namespace Luwow::Task {
         return 1;
     }
 
-    ILuauModule* Library::initialize(Engine* engine) {
+    ILuauModule* Library::initialize(ILuauHost* host) {
         Library* task = new Library();
-        task->setEngine(engine);
+        task->setHost(host);
 
         uv_loop_t* loop = new uv_loop_t;
         uv_loop_init(loop);
 
-        lua_State* mainThread = engine->getMainState(); 
+        lua_State* mainThread = host->getMainState();
         task->scheduler = new Scheduler(mainThread, loop);
         Library::instance = task;
 
-        engine->setMessagePumpCallback(&Library::pumpEvents);
-        engine->setTaskSchedulerCallback(&Library::schedulerCallback);
+        host->setMessagePumpCallback(&Library::pumpEvents);
+        host->setTaskSchedulerCallback(&Library::schedulerCallback);
 
         return task;
     }
@@ -165,3 +165,5 @@ namespace Luwow::Task {
         return exports;
     }
 } // namespace Luwow::Task
+
+LUWOW_REGISTER_MODULE(Luwow::Task::Library)
