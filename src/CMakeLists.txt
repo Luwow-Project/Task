@@ -1,5 +1,6 @@
 luwow_add_library(Luwow.TaskLibrary
     NAME task
+    MODES SERIAL PARALLEL
     SOURCES
         Library.h
         Library.cpp
@@ -10,4 +11,6 @@ target_include_directories(Luwow.TaskLibrary PRIVATE
     ${TASK_ROOT}/src
     ${LIBUV_ROOT}/include
 )
-target_link_libraries(Luwow.TaskLibrary PRIVATE uv_a)
+
+find_package(Threads REQUIRED)
+target_link_libraries(Luwow.TaskLibrary PRIVATE uv_a Threads::Threads)

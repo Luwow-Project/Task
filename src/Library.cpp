@@ -2,6 +2,7 @@
 #include "lualib.h"
 #include "uv.h"
 
+#include <cstdio>
 #include <stdexcept>
 
 namespace Luwow::Task {
@@ -13,88 +14,79 @@ namespace Luwow::Task {
         return task;
     }
 
-    Library* Library::instance = nullptr;
-
     Library::Library() : host(nullptr), scheduler(nullptr) {}
 
     Library::~Library() {
         if (scheduler) {
             delete scheduler;
         }
-        Library::instance = nullptr;
     }
 
-    void Library::pumpEvents() {
-        if (!instance) return;
-        Scheduler* scheduler = instance->scheduler;
+    void Library::run() {
         if (!scheduler) return;
-        uv_run(scheduler->getLoop(), UV_RUN_DEFAULT);
+        scheduler->run();
     }
 
-    int Library::schedulerCallback(lua_State* L, const std::string& chunkName, const std::string& bytecode, bool saveRef) {
-        if (!instance) return 0;
-        Scheduler* scheduler = instance->scheduler;
-        if (!scheduler) return 0;
-        
-        lua_State* T = lua_newthread(L);
-        lua_State* TL = lua_newthread(T);
-        luaL_sandboxthread(TL);
+    void Library::stop() {
+        if (!scheduler) return;
+        scheduler->stop();
+    }
 
-        int result = luau_load(TL, chunkName.c_str(), bytecode.data(), bytecode.size(), 0);
-        if (result != 0) {
-            lua_xmove(TL, L, 1);
-            lua_remove(L, -2);
-            return 0;
-        }
+    Luwow::Engine::RunMode Library::getRunMode() const {
+        return LUWOW_MODULE_RUN_MODE;
+    }
 
-        instance->host->callDebuggerLuauCallback(TL, chunkName, true);
-        scheduler->spawn(T);
+    // Spawns the requested threads from the bus.
+    void Library::spawnRequest(void* context, Luwow::Engine::Message& message) {
+        Library* task = static_cast<Library*>(context);
+        message.result = task->scheduler->runThread(message.state);
+    }
 
-        // If the thread has yielded, we run the uv loop here manually.
-        while (lua_status(TL) == LUA_YIELD) {
-            int hasActiveHandles = uv_run(scheduler->getLoop(), UV_RUN_ONCE);
-            // If coroutine.yield() is called without a task.wait, there are no timers, so we error.
-            if (hasActiveHandles == 0 && lua_status(TL) == LUA_YIELD) {
-                lua_remove(L, -2);
-                luaL_error(L, "Thread yielded with no active tasks.");
-                return 0;
-            }
-        }
+    // Watches a socket for another library, resuming message.state once the socket is readable
+    void Library::watchRequest(void* context, Luwow::Engine::Message& message) {
+        Library* task = static_cast<Library*>(context);
+        uv_os_sock_t socket = static_cast<uv_os_sock_t>(std::stoull(message.data));
+        task->scheduler->watch(message.state, socket);
+        message.result = 1;
+    }
 
-        int status = lua_status(TL);
-        if (status != LUA_OK) {
-            lua_remove(L, -2);
-            return 0; 
-        }
+    void Library::unwatchRequest(void* context, Luwow::Engine::Message& message) {
+        Library* task = static_cast<Library*>(context);
+        message.result = task->scheduler->unwatch(message.state) ? 1 : 0;
+    }
 
-        if (saveRef) {
-            if (lua_gettop(TL) != 1) {
-                lua_remove(L, -1);
-                luaL_error(L, "%s didn't return exactly one value", chunkName.c_str());
-                return 0;
-            }
-            lua_xmove(TL, L, 1);
-        } else {
-            lua_settop(TL, 0); 
-        }
+    // Resumes message.state with its message.result top values, now, next cycle or after message.data seconds
+    void Library::resumeRequest(void* context, Luwow::Engine::Message& message) {
+        Library* task = static_cast<Library*>(context);
+        message.result = task->scheduler->resumeNow(message.state, message.result);
+    }
 
-        lua_remove(L, -2);
-        return 1;
+    void Library::deferRequest(void* context, Luwow::Engine::Message& message) {
+        Library* task = static_cast<Library*>(context);
+        task->scheduler->resumeLater(message.state, message.result, 0);
+    }
+
+    void Library::delayRequest(void* context, Luwow::Engine::Message& message) {
+        Library* task = static_cast<Library*>(context);
+        double seconds = message.data.empty() ? 0 : std::stod(message.data);
+        task->scheduler->resumeLater(message.state, message.result, seconds);
     }
 
     ILuauModule* Library::initialize(ILuauHost* host) {
         Library* task = new Library();
-        task->setHost(host);
+        task->host = host;
 
-        uv_loop_t* loop = new uv_loop_t;
-        uv_loop_init(loop);
+        bool parallel = task->getRunMode() == Luwow::Engine::RunMode::Parallel;
+        task->scheduler = new Scheduler(host, host->getMainState(), parallel);
 
-        lua_State* mainThread = host->getMainState();
-        task->scheduler = new Scheduler(mainThread, loop);
-        Library::instance = task;
-
-        host->setMessagePumpCallback(&Library::pumpEvents);
-        host->setTaskSchedulerCallback(&Library::schedulerCallback);
+        if (!host->handle(Luwow::Engine::Topics::SchedulerSpawn, &Library::spawnRequest, task)) {
+            fprintf(stderr, "[Task Scheduler] %s is already handled, scripts won't run through task\n", Luwow::Engine::Topics::SchedulerSpawn);
+        }
+        host->handle(Luwow::Engine::Topics::SchedulerResume, &Library::resumeRequest, task);
+        host->handle(Luwow::Engine::Topics::SchedulerDefer, &Library::deferRequest, task);
+        host->handle(Luwow::Engine::Topics::SchedulerDelay, &Library::delayRequest, task);
+        host->handle(Luwow::Engine::Topics::SchedulerWatch, &Library::watchRequest, task);
+        host->handle(Luwow::Engine::Topics::SchedulerUnwatch, &Library::unwatchRequest, task);
 
         return task;
     }
