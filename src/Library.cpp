@@ -72,6 +72,14 @@ namespace Luwow::Task {
         task->scheduler->resumeLater(message.state, message.result, seconds);
     }
 
+    void Library::exitRequest(void* context, Luwow::Engine::Message&) {
+        static_cast<Library*>(context)->scheduler->exit();
+    }
+
+    void Library::holdRequest(void* context, Luwow::Engine::Message& message) {
+        static_cast<Library*>(context)->scheduler->hold(message.result);
+    }
+
     ILuauModule* Library::initialize(ILuauHost* host) {
         Library* task = new Library();
         task->host = host;
@@ -87,6 +95,8 @@ namespace Luwow::Task {
         host->handle(Luwow::Engine::Topics::SchedulerDelay, &Library::delayRequest, task);
         host->handle(Luwow::Engine::Topics::SchedulerWatch, &Library::watchRequest, task);
         host->handle(Luwow::Engine::Topics::SchedulerUnwatch, &Library::unwatchRequest, task);
+        host->handle(Luwow::Engine::Topics::SchedulerExit, &Library::exitRequest, task);
+        host->handle(Luwow::Engine::Topics::SchedulerHold, &Library::holdRequest, task);
 
         return task;
     }

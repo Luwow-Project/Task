@@ -33,6 +33,10 @@ namespace Luwow::Task {
         static void resumeRequest(void* context, Luwow::Engine::Message& message);
         static void deferRequest(void* context, Luwow::Engine::Message& message);
         static void delayRequest(void* context, Luwow::Engine::Message& message);
+        // Handles scheduler-exit requests
+        static void exitRequest(void* context, Luwow::Engine::Message& message);
+        // Handles scheduler-hold requests
+        static void holdRequest(void* context, Luwow::Engine::Message& message);
 
         // Serial: runs the remaining tasks after the main script. Parallel: runs the loop on the module's thread.
         void run() override;

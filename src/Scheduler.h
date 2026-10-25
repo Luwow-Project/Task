@@ -53,20 +53,28 @@ namespace Luwow::Task {
             // Runs the loop until no tasks are left, in parallel mode only after stop was requested
             void run();
             void stop();
+            // Stops for the program's end: the loop returns as soon as it can, and nothing pending is resumed.
+            void exit();
+            // Counts work that will resume a thread
+            void hold(int delta);
         private:
             ILuauHost* host;
             lua_State* mainThread;
             bool parallel;
 
             uv_loop_t loop;
-            uv_async_t async; // Wakes the loop thread for queued work, parallel mode only
+            uv_async_t async; // Wakes the loop thread for work queued from other threads
             bool asyncClosed = false;
+            // Set once the loop may end, only used on the loop thread
+            bool stopRequested = false;
             std::atomic<std::thread::id> loopThread;
 
             // Guards everything below, which both the loop thread and Luau callers use
             std::mutex mutex;
             std::vector<std::function<void()>> commands;
             bool acceptingCommands = true;
+            std::atomic<bool> exiting = false;
+            std::atomic<int> holds = 0;
 
             // Maps a suspended lua_State (thread) to its active libuv timer
             std::unordered_map<lua_State*, uv_timer_t*> pendingTimers;
@@ -82,6 +90,7 @@ namespace Luwow::Task {
             void post(std::function<void()> command);
             void runCommands();
             void notifyResumed();
+            void keepAlive();
             void addTimer(lua_State* thread, int threadRef, int nargs, bool isWait, double seconds);
 
             static void timerCb(uv_timer_t* handle);

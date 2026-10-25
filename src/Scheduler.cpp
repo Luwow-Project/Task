@@ -2,7 +2,9 @@
 #include "lualib.h"
 #include "uv.h"
 
+#include <chrono>
 #include <cstdio>
+#include <thread>
 
 namespace Luwow::Task {
     // Static helper functions
@@ -36,15 +38,22 @@ namespace Luwow::Task {
     Scheduler::Scheduler(ILuauHost* host, lua_State* mainThread, bool parallel)
         : host(host), mainThread(mainThread), parallel(parallel) {
         uv_loop_init(&loop);
+        uv_async_init(&loop, &async, asyncCb);
+        async.data = this;
 
-        if (parallel) {
-            uv_async_init(&loop, &async, asyncCb);
-            async.data = this;
+        if (!parallel) {
+            loopThread = std::this_thread::get_id();
+            stopRequested = true;
+            uv_unref((uv_handle_t*)&async);
         }
     }
 
     // The loop thread has ended and the state may be closed, so only the loop's handles are released
     Scheduler::~Scheduler() {
+        // Work still out would use the state once it's done, so it's given a few seconds to finish
+        for (int waited = 0; holds > 0 && waited < 500; ++waited) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
         runCommands();
 
         for (auto& pair : pendingTimers) {
@@ -57,7 +66,7 @@ namespace Luwow::Task {
         }
         pendingWatches.clear();
 
-        if (parallel && !asyncClosed) {
+        if (!asyncClosed) {
             asyncClosed = true;
             uv_close((uv_handle_t*)&async, nullptr);
         }
@@ -219,24 +228,53 @@ namespace Luwow::Task {
 
     void Scheduler::run() {
         loopThread = std::this_thread::get_id();
-        uv_run(&loop, UV_RUN_DEFAULT);
+        if (!exiting) uv_run(&loop, UV_RUN_DEFAULT);
+
+        // Nothing can resume a thread anymore, threads waiting for one are told so
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            acceptingCommands = false;
+        }
+        notifyResumed();
     }
 
-    // Closing the wake-up handle lets the loop end once its remaining timers have fired
+    // The loop thread stops its loop. Another thread wakes it with the async handle while it's open;
+    // after stop closed it, the next timer or poll to fire stops the loop instead.
+    void Scheduler::exit() {
+        exiting = true;
+        bool wake = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            acceptingCommands = false;
+            wake = !asyncClosed && !isLoopThread();
+            if (wake) uv_async_send(&async);
+        }
+        if (isLoopThread()) uv_stop(&loop);
+        notifyResumed();
+    }
+
+    // The loop ends once its remaining timers have fired and no work is out
     void Scheduler::stop() {
         if (!parallel) return;
 
         post([this] {
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                acceptingCommands = false;
-            }
-            if (!asyncClosed) {
-                asyncClosed = true;
-                uv_close((uv_handle_t*)&async, nullptr);
-            }
-            notifyResumed();
+            stopRequested = true;
+            keepAlive();
         });
+    }
+
+    void Scheduler::hold(int delta) {
+        holds += delta;
+        post([this] { keepAlive(); });
+        if (delta < 0) notifyResumed();
+    }
+
+    // The wake-up handle keeps the loop running until it's asked to stop, and after
+    // that while work is out on other threads, since that work will post the resume of its thread
+    void Scheduler::keepAlive() {
+        if (asyncClosed) return;
+        if (!stopRequested || holds > 0) uv_ref((uv_handle_t*)&async);
+        else uv_unref((uv_handle_t*)&async);
     }
 
     int Scheduler::resumeNow(lua_State* thread, int nargs) {
@@ -278,7 +316,7 @@ namespace Luwow::Task {
 
             // Let the loop thread resume the thread, it needs the state lock to do so
             std::unique_lock<std::mutex> lock(mutex);
-            if (!acceptingCommands || (pendingTimers.empty() && pendingWatches.empty() && commands.empty())) return false;
+            if (!acceptingCommands || (pendingTimers.empty() && pendingWatches.empty() && commands.empty() && holds == 0)) return false;
 
             uint64_t seen = resumeCount;
             lock.unlock();
@@ -294,7 +332,7 @@ namespace Luwow::Task {
     // Private helpers
 
     bool Scheduler::isLoopThread() const {
-        return !parallel || std::this_thread::get_id() == loopThread.load();
+        return std::this_thread::get_id() == loopThread.load();
     }
 
     // Runs a command on the loop thread, in the order it was posted
@@ -353,6 +391,11 @@ namespace Luwow::Task {
     void Scheduler::timerCb(uv_timer_t* handle) {
         auto* data = static_cast<TaskTimerData*>(handle->data);
         Scheduler* self = data->scheduler;
+        // Left pending, the destructor closes it
+        if (self->exiting) {
+            uv_stop(&self->loop);
+            return;
+        }
 
         {
             Luwow::Engine::StateLock stateLock(self->host);
@@ -397,6 +440,10 @@ namespace Luwow::Task {
     void Scheduler::pollCb(uv_poll_t* handle, int status, int events) {
         auto* data = static_cast<TaskPollData*>(handle->data);
         uv_poll_stop(handle);
+        if (data->scheduler->exiting) {
+            uv_stop(&data->scheduler->loop);
+            return;
+        }
 
         // A cancelled watch is closed by the unwatch that cancelled it
         if (data->scheduler->finishWatch(handle)) {
@@ -439,7 +486,12 @@ namespace Luwow::Task {
     }
 
     void Scheduler::asyncCb(uv_async_t* handle) {
-        static_cast<Scheduler*>(handle->data)->runCommands();
+        Scheduler* self = static_cast<Scheduler*>(handle->data);
+        if (self->exiting) {
+            uv_stop(&self->loop);
+            return;
+        }
+        self->runCommands();
     }
 
     void Scheduler::closeTimer(uv_timer_t* timer) {

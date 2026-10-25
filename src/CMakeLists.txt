@@ -1,6 +1,6 @@
 luwow_add_library(Luwow.TaskLibrary
     NAME task
-    MODES SERIAL PARALLEL
+    MODES PARALLEL SERIAL
     SOURCES
         Library.h
         Library.cpp
