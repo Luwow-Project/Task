@@ -86,6 +86,11 @@ namespace Luwow::Task {
             std::condition_variable resumed;
             uint64_t resumeCount = 0;
 
+            // How long they run at a time, which is also how soon a waiting thread sees it was resumed
+            static constexpr int MainThreadEventsMs = 10;
+
+            bool runMainThreadEvents(int milliseconds);
+            bool unfinished(lua_State* thread) const;
             bool isLoopThread() const;
             void post(std::function<void()> command);
             void runCommands();

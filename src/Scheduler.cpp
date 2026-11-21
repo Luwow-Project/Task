@@ -305,12 +305,24 @@ namespace Luwow::Task {
         return lua_status(thread);
     }
 
+    // Yielded, or being resumed on another thread, which may have released the state lock in the middle of it.
+    bool Scheduler::unfinished(lua_State* thread) const {
+        int status = lua_status(thread);
+        return status == LUA_YIELD || (status == LUA_OK && lua_costatus(mainThread, thread) == LUA_CONOR);
+    }
+
     bool Scheduler::waitForThread(lua_State* thread) {
-        while (lua_status(thread) == LUA_YIELD) {
+        while (unfinished(thread)) {
             if (isLoopThread()) {
-                // The loop belongs to this thread, so it's driven from here
-                int hasActiveHandles = uv_run(&loop, UV_RUN_ONCE);
-                if (hasActiveHandles == 0 && lua_status(thread) == LUA_YIELD) return false;
+                // The loop belongs to this thread, so it's driven from here.
+                int timeout = uv_backend_timeout(&loop);
+                bool ranEvents = timeout != 0 && runMainThreadEvents(timeout < 0 || timeout > MainThreadEventsMs ? MainThreadEventsMs : timeout);
+                int hasActiveHandles = 0;
+                {
+                    Luwow::Engine::StateRelease release(host);
+                    hasActiveHandles = uv_run(&loop, ranEvents ? UV_RUN_NOWAIT : UV_RUN_ONCE);
+                }
+                if (hasActiveHandles == 0 && unfinished(thread)) return false;
                 continue;
             }
 
@@ -321,6 +333,9 @@ namespace Luwow::Task {
             uint64_t seen = resumeCount;
             lock.unlock();
 
+            // The thread's events, run meanwhile where a library has them
+            if (runMainThreadEvents(MainThreadEventsMs)) continue;
+
             Luwow::Engine::StateRelease release(host);
             lock.lock();
             resumed.wait(lock, [&] { return resumeCount != seen; });
@@ -330,6 +345,16 @@ namespace Luwow::Task {
     }
 
     // Private helpers
+
+    // Another library runs this thread's events, while the state is
+    // released. False when none does here.
+    bool Scheduler::runMainThreadEvents(int milliseconds) {
+        Luwow::Engine::Message wait;
+        wait.topic = Luwow::Engine::Topics::MainThreadWait;
+        wait.data = std::to_string(milliseconds);
+        wait.state = mainThread;
+        return host->request(wait) && wait.result == 1;
+    }
 
     bool Scheduler::isLoopThread() const {
         return std::this_thread::get_id() == loopThread.load();
